@@ -1,0 +1,70 @@
+// Unit tests for interest-rate helpers and the Accumulator.
+use core::fixed::{Ray, Wad}
+use ingot::{Accumulator, Down, Up, SECONDS_PER_YEAR, apr_to_per_second, compound, compound_continuous, from_scaled, linear, per_second_to_apr, to_scaled}
+
+const FIVE_PCT: Ray = Ray::from_ratio(5, 100)
+
+#[test]
+fn apr_round_trip() {
+    let r = apr_to_per_second(FIVE_PCT).raw()
+    // exact value 1547125957863212449.4..; rounded down, within one ulp
+    assert!(r == 1547125957863212449 || r == 1547125957863212448)
+    // compounding it for a year gives back 5% to ~1e-17
+    let back = per_second_to_apr(Ray::from_raw(r)).raw()
+    assert!(back <= 50000000000000000000000000)
+    assert!(back >= 49999999990000000000000000)
+}
+
+#[test]
+fn compounding_modes() {
+    assert!(compound(Ray::zero(), 1000) == Ray::one())
+    assert!(compound(FIVE_PCT, 0) == Ray::one())
+    assert!(compound(FIVE_PCT, 2) == Ray::from_ratio(11025, 10000))
+    assert!(linear(FIVE_PCT, 2) == Ray::from_ratio(110, 100))
+    let c = compound_continuous(FIVE_PCT, SECONDS_PER_YEAR).raw()
+    // e^0.05 = 1.051271096376024039697517636..
+    assert!(c == 1051271096376024039697517636 || c == 1051271096376024039697517635)
+    // continuous >= discrete >= simple for positive rates
+    let per_sec = apr_to_per_second(FIVE_PCT)
+    assert!(compound_continuous(FIVE_PCT, SECONDS_PER_YEAR) >= compound(per_sec, SECONDS_PER_YEAR))
+    assert!(compound(FIVE_PCT, 3) >= linear(FIVE_PCT, 3))
+}
+
+#[test]
+fn scaled_balances_round_in_the_chosen_direction() {
+    let index = Ray::from_ratio(11, 10)
+    let amount = Wad::from_int(1000)
+    assert!(to_scaled<Down>(amount, index).raw() == 909090909090909090909)
+    assert!(to_scaled<Up>(amount, index).raw() == 909090909090909090910)
+    // deposit-then-withdraw at the same index never creates value
+    let shares = to_scaled<Down>(amount, index)
+    assert!(from_scaled<Down>(shares, index) <= amount)
+    // borrow-then-repay at the same index never loses value
+    let debt = to_scaled<Up>(amount, index)
+    assert!(from_scaled<Up>(debt, index) >= amount)
+}
+
+#[test]
+fn accumulator_tracks_time() {
+    let rate = apr_to_per_second(FIVE_PCT)
+    var acc = Accumulator::new(rate, 1000)
+    assert!(acc.index_at(1000) == Ray::one())
+    // time going backwards is ignored
+    assert!(acc.index_at(10) == Ray::one())
+    acc.accrue(1000 + SECONDS_PER_YEAR)
+    assert!(acc.last == 1000 + SECONDS_PER_YEAR)
+    let one_year = acc.index.raw()
+    assert!(one_year >= 1049999999990000000000000000)
+    assert!(one_year <= 1050000000010000000000000000)
+    // accruing in two halves matches accruing once, up to rounding
+    var split = Accumulator::new(rate, 0)
+    split.accrue(SECONDS_PER_YEAR / 2)
+    split.accrue(SECONDS_PER_YEAR)
+    let diff = if split.index.raw() > one_year { split.index.raw() - one_year } else { one_year - split.index.raw() }
+    assert!(diff <= 1000000000)
+    // a rate change accrues first
+    acc.set_rate(Ray::zero(), 1000 + 2 * SECONDS_PER_YEAR)
+    let two_years = acc.index
+    acc.accrue(1000 + 5 * SECONDS_PER_YEAR)
+    assert!(acc.index == two_years)
+}

@@ -1,0 +1,106 @@
+//! Interest-rate primitives in the Aave / MakerDAO style.
+//!
+//! Rates are `Ray` (27 decimals). A per-second rate `r` compounds as
+//! `(1 + r)^t`; balances are stored "scaled" (divided by a cumulative index)
+//! so that accrual is O(1) per interaction.
+//!
+//! Every conversion that can lose precision takes a rounding mode, so the
+//! direction that protects the protocol is chosen at the call site and
+//! checked by the compiler:
+//!
+//! ```fe
+//! let shares = to_scaled<Down>(deposit, index)     // credit depositors less
+//! let owed   = from_scaled<Up>(debt_shares, index) // charge borrowers more
+//! ```
+use core::fixed::{Fixed, Ray, Wad}
+use core::panics::{PANIC_OVERFLOW}
+use super::math::{exp_from_e36, ln_e36}
+use super::rounding::{Rounding, mul_div_r}
+use super::ops::FixedOps
+
+/// Seconds in a 365-day year.
+pub const SECONDS_PER_YEAR: u256 = 31536000
+
+const RAY_RAW: u256 = 1000000000000000000000000000
+
+/// `(1 + rate)^t` for a per-second `rate`, using `core::fixed`'s `**`
+/// (exponentiation by squaring, half-up at each step).
+pub fn compound(_ rate: Ray, _ t: u256) -> Ray {
+    (Ray::one() + rate) ** t
+}
+
+/// `1 + rate * t`: simple (non-compounding) growth.
+pub fn linear(_ rate: Ray, _ t: u256) -> Ray {
+    Ray::one() + rate.mul_int(t)
+}
+
+/// `e^(apr * t / year)`: continuous compounding of an annual rate.
+pub fn compound_continuous(_ apr: Ray, _ t: u256) -> Ray {
+    // apr * t / year at 1e-36: apr.raw * 1e9 * t / year
+    let x = mul_div_r<super::rounding::Down>(apr.raw() * 1000000000, t, SECONDS_PER_YEAR).unwrap()
+    exp_from_e36<27>(i256::from_word(x))
+}
+
+/// The per-second rate `r` with `(1 + r)^year == 1 + apr` (exact in real
+/// arithmetic; rounded down here).
+pub fn apr_to_per_second(_ apr: Ray) -> Ray {
+    let l = ln_e36<27>(Ray::one() + apr) / i256::from_word(SECONDS_PER_YEAR)
+    exp_from_e36<27>(l) - Ray::one()
+}
+
+/// The annual rate produced by compounding a per-second `rate` for a year.
+pub fn per_second_to_apr(_ rate: Ray) -> Ray {
+    compound(rate, SECONDS_PER_YEAR) - Ray::one()
+}
+
+/// `amount / index`, rounded by `R` (a Wad amount over a Ray index).
+pub fn to_scaled<R: Rounding>(_ amount: Wad, _ index: Ray) -> Wad {
+    match mul_div_r<R>(amount.raw(), RAY_RAW, index.raw()) {
+        Some(v) => Wad::from_raw(v),
+        None => core::panic_code(PANIC_OVERFLOW),
+    }
+}
+
+/// `scaled * index`, rounded by `R`.
+pub fn from_scaled<R: Rounding>(_ scaled: Wad, _ index: Ray) -> Wad {
+    match mul_div_r<R>(scaled.raw(), index.raw(), RAY_RAW) {
+        Some(v) => Wad::from_raw(v),
+        None => core::panic_code(PANIC_OVERFLOW),
+    }
+}
+
+/// A cumulative interest index with a per-second rate.
+pub struct Accumulator {
+    pub index: Ray,
+    pub rate: Ray,
+    pub last: u256,
+}
+
+impl Accumulator {
+    pub fn new(_ rate: Ray, _ now: u256) -> Self {
+        Accumulator { index: Ray::one(), rate, last: now }
+    }
+
+    /// The index at time `now` without mutating (rounded up, so debts
+    /// measured against it are never understated).
+    pub fn index_at(self, _ now: u256) -> Ray {
+        if now <= self.last {
+            return self.index
+        }
+        self.index.mul_r<super::rounding::Up>(compound(self.rate, now - self.last))
+    }
+
+    /// Advances the index to `now`.
+    pub fn accrue(mut self, _ now: u256) {
+        self.index = self.index_at(now)
+        if now > self.last {
+            self.last = now
+        }
+    }
+
+    /// Accrues to `now`, then switches to a new per-second rate.
+    pub fn set_rate(mut self, _ rate: Ray, _ now: u256) {
+        self.accrue(now)
+        self.rate = rate
+    }
+}

@@ -255,6 +255,17 @@ def s_compound(rng, n):
     return out
 
 
+def s_cont(rng, n):
+    out = [(0, 31536000), (5 * 10**25, 31536000), (RAY, 10 * 31536000)]
+    while len(out) < n:
+        out.append((rng.randint(0, 2 * RAY), rng.randint(0, 20 * 31536000)))
+    return out
+
+
+def r_cont(apr, t):
+    return (D(apr) / RAY * t / 31536000).exp() * RAY
+
+
 def s_apr(rng, n):
     out = [(0,), (5 * 10**25,), (RAY,)]
     while len(out) < n:
@@ -431,6 +442,9 @@ FATHOM_SPECS: list[Spec] = [
     Spec("fathom.rate.compound", "fathom", "(1+r)^t, per-second Ray rate", 2, False,
          "compound(Ray::from_raw({a}), {b}).raw()", s_compound, r_compound, scale=RAY,
          ulp_unit="1e-27", rel_floor=10**9),
+    Spec("fathom.rate.compound_continuous", "fathom", "e^(apr*t/yr)", 2, False,
+         "compound_continuous(Ray::from_raw({a}), {b}).raw()", s_cont, r_cont, scale=RAY,
+         ulp_unit="1e-27"),
     Spec("fathom.rate.apr_to_per_second", "fathom", "r s.t. (1+r)^yr = 1+APR", 1, False,
          "apr_to_per_second(Ray::from_raw({a})).raw()", s_apr, r_apr_to_rate, scale=RAY,
          ulp_unit="1e-27"),

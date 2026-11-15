@@ -3,3 +3,4 @@
 pub use rounding::{Down, Nearest, Rounding, Up, Zero, apply_sign, mul_div_r, signed_mul_div_r}
 pub use ops::{FixedOps, checked_rescale, checked_rescale_signed}
 pub use math::{SRay, cbrt, exp, exp_from_e36, ln, ln_e36, log10, log2, pow}
+pub use rate::{Accumulator, SECONDS_PER_YEAR, apr_to_per_second, compound, compound_continuous, from_scaled, linear, per_second_to_apr, to_scaled}
