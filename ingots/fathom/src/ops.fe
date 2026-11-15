@@ -1,0 +1,156 @@
+//! Rounding-aware and checked arithmetic for `core::fixed`.
+//!
+//! [`FixedOps`] is implemented for every `UFixed<D>` and `Fixed<D>`, so code
+//! written against it is generic over both the scale `D` and signedness:
+//!
+//! ```fe
+//! use fathom::{FixedOps, Up, Nearest}
+//! let fee = amount.mul_r<Up>(rate)                 // panics on overflow
+//! let maybe = amount.checked_div<Nearest>(price)   // Option<Wad>
+//! ```
+//!
+//! Panicking forms fail like `core::fixed`: `Panic(0x11)` on overflow and
+//! `Panic(0x12)` on division by zero. Checked forms return `None` instead.
+use core::fixed::{Fixed, UFixed}
+use core::panics::{PANIC_DIVISION_BY_ZERO, PANIC_OVERFLOW}
+use super::rounding::{Rounding, mul_div_r, signed_mul_div_r}
+
+pub trait FixedOps {
+    /// `self * other`, rounded by `R`. `None` on overflow.
+    fn checked_mul<R: Rounding>(self, _ other: Self) -> Option<Self>
+    /// `self / other`, rounded by `R`. `None` on overflow or division by zero.
+    fn checked_div<R: Rounding>(self, _ other: Self) -> Option<Self>
+    /// `self + other`, `None` on overflow.
+    fn checked_add(self, _ other: Self) -> Option<Self>
+    /// `self - other`, `None` on overflow (for unsigned: if `other > self`).
+    fn checked_sub(self, _ other: Self) -> Option<Self>
+    /// `self * other`, rounded by `R`. Panics with `Panic(0x11)` on overflow.
+    fn mul_r<R: Rounding>(self, _ other: Self) -> Self
+    /// `self / other`, rounded by `R`. Panics with `Panic(0x12)` on division
+    /// by zero and `Panic(0x11)` on overflow.
+    fn div_r<R: Rounding>(self, _ other: Self) -> Self
+}
+
+impl<const D: u256> FixedOps for UFixed<D> {
+    fn checked_mul<R: Rounding>(self, _ other: Self) -> Option<Self> {
+        match mul_div_r<R>(self.raw(), other.raw(), Self::SCALE) {
+            Some(v) => Some(UFixed<D>::from_raw(v)),
+            None => None,
+        }
+    }
+
+    fn checked_div<R: Rounding>(self, _ other: Self) -> Option<Self> {
+        match mul_div_r<R>(self.raw(), Self::SCALE, other.raw()) {
+            Some(v) => Some(UFixed<D>::from_raw(v)),
+            None => None,
+        }
+    }
+
+    #[arithmetic(unchecked)]
+    fn checked_add(self, _ other: Self) -> Option<Self> {
+        let s = self.raw() + other.raw()
+        if s < self.raw() { None } else { Some(UFixed<D>::from_raw(s)) }
+    }
+
+    #[arithmetic(unchecked)]
+    fn checked_sub(self, _ other: Self) -> Option<Self> {
+        if other.raw() > self.raw() {
+            None
+        } else {
+            Some(UFixed<D>::from_raw(self.raw() - other.raw()))
+        }
+    }
+
+    fn mul_r<R: Rounding>(self, _ other: Self) -> Self {
+        match self.checked_mul<R>(other) {
+            Some(v) => v,
+            None => core::panic_code(PANIC_OVERFLOW),
+        }
+    }
+
+    fn div_r<R: Rounding>(self, _ other: Self) -> Self {
+        if other.raw() == 0 {
+            core::panic_code(PANIC_DIVISION_BY_ZERO)
+        }
+        match self.checked_div<R>(other) {
+            Some(v) => v,
+            None => core::panic_code(PANIC_OVERFLOW),
+        }
+    }
+}
+
+impl<const D: u256> FixedOps for Fixed<D> {
+    fn checked_mul<R: Rounding>(self, _ other: Self) -> Option<Self> {
+        match signed_mul_div_r<R>(self.raw(), other.raw(), i256::from_word(Self::SCALE)) {
+            Some(v) => Some(Fixed<D>::from_raw(v)),
+            None => None,
+        }
+    }
+
+    fn checked_div<R: Rounding>(self, _ other: Self) -> Option<Self> {
+        match signed_mul_div_r<R>(self.raw(), i256::from_word(Self::SCALE), other.raw()) {
+            Some(v) => Some(Fixed<D>::from_raw(v)),
+            None => None,
+        }
+    }
+
+    #[arithmetic(unchecked)]
+    fn checked_add(self, _ other: Self) -> Option<Self> {
+        let a = self.raw()
+        let b = other.raw()
+        let s = a + b
+        // Overflow iff both operands share a sign that the sum does not.
+        if (a < 0) == (b < 0) && (s < 0) != (a < 0) {
+            None
+        } else {
+            Some(Fixed<D>::from_raw(s))
+        }
+    }
+
+    #[arithmetic(unchecked)]
+    fn checked_sub(self, _ other: Self) -> Option<Self> {
+        let a = self.raw()
+        let b = other.raw()
+        let s = a - b
+        if (a < 0) != (b < 0) && (s < 0) != (a < 0) {
+            None
+        } else {
+            Some(Fixed<D>::from_raw(s))
+        }
+    }
+
+    fn mul_r<R: Rounding>(self, _ other: Self) -> Self {
+        match self.checked_mul<R>(other) {
+            Some(v) => v,
+            None => core::panic_code(PANIC_OVERFLOW),
+        }
+    }
+
+    fn div_r<R: Rounding>(self, _ other: Self) -> Self {
+        if other.raw() == 0 {
+            core::panic_code(PANIC_DIVISION_BY_ZERO)
+        }
+        match self.checked_div<R>(other) {
+            Some(v) => v,
+            None => core::panic_code(PANIC_OVERFLOW),
+        }
+    }
+}
+
+/// `x` rescaled from `D` to `E` decimals, rounded by `R`. `None` on overflow.
+/// (`core::fixed` offers `rescale` (down) and `rescale_up`; this adds
+/// `Nearest` and a non-panicking form.)
+pub fn checked_rescale<R: Rounding, const D: u256, const E: u256>(_ x: UFixed<D>) -> Option<UFixed<E>> {
+    match mul_div_r<R>(x.raw(), UFixed<E>::SCALE, UFixed<D>::SCALE) {
+        Some(v) => Some(UFixed<E>::from_raw(v)),
+        None => None,
+    }
+}
+
+/// Signed rescale from `D` to `E` decimals, rounded by `R`. `None` on overflow.
+pub fn checked_rescale_signed<R: Rounding, const D: u256, const E: u256>(_ x: Fixed<D>) -> Option<Fixed<E>> {
+    match signed_mul_div_r<R>(x.raw(), i256::from_word(Fixed<E>::SCALE), i256::from_word(Fixed<D>::SCALE)) {
+        Some(v) => Some(Fixed<E>::from_raw(v)),
+        None => None,
+    }
+}

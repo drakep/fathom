@@ -1,1 +1,4 @@
-pub fn placeholder() -> u256 { 1 }
+//! Fathom: rounding-aware, checked and extended fixed-point math on top of
+//! `core::fixed`. See README.md for what Fathom adds and what it reuses.
+pub use rounding::{Down, Nearest, Rounding, Up, Zero, apply_sign, mul_div_r, signed_mul_div_r}
+pub use ops::{FixedOps, checked_rescale, checked_rescale_signed}

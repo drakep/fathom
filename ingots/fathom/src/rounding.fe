@@ -1,0 +1,115 @@
+//! Rounding modes as types.
+//!
+//! A rounding mode is a zero-sized type implementing [`Rounding`]. Operations
+//! take it as a generic parameter, so the direction is part of the call site
+//! and is resolved at compile time, with no runtime flag to get wrong:
+//!
+//! ```fe
+//! let owed = debt.mul_r<Up>(index)       // protocol never under-charges
+//! let paid = shares.mul_r<Down>(price)   // protocol never over-pays
+//! ```
+//!
+//! Directions are defined on the real number line, for signed and unsigned
+//! values alike:
+//!
+//! | mode      | rounds towards                     | signed example (-2.5 ulp) |
+//! |-----------|------------------------------------|---------------------------|
+//! | `Down`    | negative infinity (floor)          | -3                        |
+//! | `Up`      | positive infinity (ceiling)        | -2                        |
+//! | `Zero`    | zero (truncation, like `sdiv`)     | -2                        |
+//! | `Nearest` | nearest; ties away from zero       | -3                        |
+//!
+//! For unsigned values `Down` and `Zero` coincide. Note that `core::fixed`'s
+//! signed `*` and `/` truncate (`Zero`), while its unsigned ones floor.
+use core::num::{checked_mul_div, mulmod}
+
+/// A rounding direction for an exact quotient `n / d`.
+pub trait Rounding {
+    /// Rounds the quotient whose magnitude is `q + r / d` (with `r < d`) and
+    /// whose sign is negative iff `negative`. Returns the rounded magnitude,
+    /// or `None` if it does not fit in a `u256`.
+    fn round(_ q: u256, _ r: u256, _ d: u256, _ negative: bool) -> Option<u256>
+}
+
+/// Towards negative infinity.
+pub struct Down {}
+/// Towards positive infinity.
+pub struct Up {}
+/// Towards zero.
+pub struct Zero {}
+/// To the nearest representable value; exact halves round away from zero.
+pub struct Nearest {}
+
+fn bump(_ q: u256) -> Option<u256> {
+    if q == u256::max() { None } else { Some(q + 1) }
+}
+
+impl Rounding for Down {
+    fn round(_ q: u256, _ r: u256, _ d: u256, _ negative: bool) -> Option<u256> {
+        if negative && r != 0 { bump(q) } else { Some(q) }
+    }
+}
+
+impl Rounding for Up {
+    fn round(_ q: u256, _ r: u256, _ d: u256, _ negative: bool) -> Option<u256> {
+        if !negative && r != 0 { bump(q) } else { Some(q) }
+    }
+}
+
+impl Rounding for Zero {
+    fn round(_ q: u256, _ r: u256, _ d: u256, _ negative: bool) -> Option<u256> {
+        Some(q)
+    }
+}
+
+impl Rounding for Nearest {
+    fn round(_ q: u256, _ r: u256, _ d: u256, _ negative: bool) -> Option<u256> {
+        // r >= d / 2 without overflow: r >= d - r.
+        if r != 0 && r >= d - r { bump(q) } else { Some(q) }
+    }
+}
+
+/// `a * b / d` with a 512-bit intermediate, rounded by `R`. `None` on
+/// division by zero or if the result does not fit in a `u256`.
+pub fn mul_div_r<R: Rounding>(_ a: u256, _ b: u256, _ d: u256) -> Option<u256> {
+    match checked_mul_div(a, b, d) {
+        Some(q) => R::round(q, mulmod(a, b, d), d, false),
+        None => None,
+    }
+}
+
+const I256_MAX: u256 = 0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+
+/// Signed `a * b / d` with a 512-bit intermediate, rounded by `R`. `None` on
+/// division by zero or if the result does not fit in an `i256`.
+#[arithmetic(unchecked)]
+pub fn signed_mul_div_r<R: Rounding>(_ a: i256, _ b: i256, _ d: i256) -> Option<i256> {
+    if d == 0 {
+        return None
+    }
+    let negative = ((a < 0) != (b < 0)) != (d < 0)
+    let am = a.unsigned_abs()
+    let bm = b.unsigned_abs()
+    let dm = d.unsigned_abs()
+    match checked_mul_div(am, bm, dm) {
+        Some(q) => {
+            let nonzero = q != 0 || mulmod(am, bm, dm) != 0
+            match R::round(q, mulmod(am, bm, dm), dm, negative && nonzero) {
+                Some(m) => apply_sign(m, negative),
+                None => None,
+            }
+        }
+        None => None,
+    }
+}
+
+/// `m` with sign `negative` as an `i256`, or `None` if out of range.
+#[arithmetic(unchecked)]
+pub fn apply_sign(_ m: u256, _ negative: bool) -> Option<i256> {
+    if negative {
+        // -2^255 is representable.
+        if m > I256_MAX + 1 { None } else { Some(i256::from_word(0 - m)) }
+    } else {
+        if m > I256_MAX { None } else { Some(i256::from_word(m)) }
+    }
+}
