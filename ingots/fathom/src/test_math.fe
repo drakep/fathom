@@ -1,0 +1,112 @@
+// Unit tests for the scale-generic math functions. Expected values are
+// 100-digit Python `decimal` results, truncated (floor) or rounded (nearest)
+// as each function documents. Bulk accuracy is measured by harness/run.py.
+use core::fixed::{Fixed, Ray, SWad, UFixed, Wad}
+use ingot::{SRay, cbrt, exp, ln, log10, log2, pow}
+
+const MAX: u256 = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+
+#[test]
+fn exp_known_values() {
+    assert!(exp<27>(SRay::zero()) == Ray::one())
+    assert!(exp<27>(SRay::one()).raw() == 2718281828459045235360287471)
+    assert!(exp<27>(-SRay::one()).raw() == 367879441171442321595523770)
+    assert!(exp<18>(SWad::zero()) == Wad::one())
+    // agrees with core's Solady port at 18 decimals to within one ulp
+    let x = SWad::from_raw(3141592653589793238)
+    let ours = exp<18>(x).raw()
+    let core_v = x.exp().raw()
+    assert!(ours + 1 >= core_v && core_v + 1 >= ours)
+    // other scales
+    assert!(exp<6>(Fixed<6>::one()).raw() == 2718281)
+    // At 36 decimals the internal precision equals the output precision, so
+    // the last digits are not exact (measured: 23 ulp low here).
+    let e36 = exp<36>(Fixed<36>::one()).raw()
+    assert!(e36 <= 2718281828459045235360287471352662497)
+    assert!(e36 >= 2718281828459045235360287471352662397)
+}
+
+#[test]
+fn exp_domain_edges() {
+    // underflow flushes to zero
+    assert!(exp<27>(SRay::from_int(-63)).is_zero())
+    assert!(exp<27>(SRay::from_int(-1000)).is_zero())
+    assert!(exp<18>(SWad::from_int(-42)).is_zero())
+    // e^115 still fits a Ray
+    assert!(!exp<27>(SRay::from_int(115)).is_zero())
+}
+
+#[test(should_revert)]
+fn exp_overflow_panics() {
+    let _ = exp<27>(SRay::from_int(116))
+}
+
+#[test(should_revert)]
+fn exp_rejects_more_than_36_decimals() {
+    let _ = exp<37>(Fixed<37>::one())
+}
+
+#[test]
+fn ln_known_values() {
+    assert!(ln<27>(Ray::one()) == SRay::zero())
+    assert!(ln<27>(Ray::from_int(2)).raw() == 693147180559945309417232121)
+    assert!(ln<18>(Wad::from_ratio(1, 2)).raw() == -693147180559945309)
+    assert!(ln<27>(Ray::from_raw(2718281828459045235360287471)).raw() == 999999999999999999999999999 || ln<27>(Ray::from_raw(2718281828459045235360287471)).raw() == 1000000000000000000000000000)
+    // full input range
+    assert!(ln<27>(Ray::from_raw(MAX)).raw() > 115000000000000000000000000000)
+    assert!(ln<27>(Ray::from_raw(1)).raw() == -62169797510839233468485769276)
+}
+
+#[test(should_revert)]
+fn ln_of_zero_fails() {
+    let _ = ln<27>(Ray::zero())
+}
+
+#[test]
+fn log2_and_log10() {
+    assert!(log2<18>(Wad::from_int(8)).raw() == 3000000000000000000)
+    assert!(log2<18>(Wad::from_ratio(1, 4)).raw() == -2000000000000000000)
+    assert!(log2<27>(Ray::from_int(1024)).raw() == 10000000000000000000000000000)
+    assert!(log10<27>(Ray::from_int(1000)).raw() == 3000000000000000000000000000)
+    assert!(log10<18>(Wad::from_ratio(1, 100)).raw() == -2000000000000000000)
+}
+
+#[test]
+fn pow_known_values() {
+    let two = Ray::from_int(2)
+    let half = SRay::from_ratio_signed(1, 2)
+    assert!(pow<27>(two, half).raw() == 1414213562373095048801688724)
+    assert!(pow<27>(two, SRay::from_int(10)) == Ray::from_int(1024))
+    assert!(pow<27>(two, SRay::from_int(-1)) == Ray::from_ratio(1, 2))
+    assert!(pow<27>(Ray::zero(), SRay::zero()) == Ray::one())
+    assert!(pow<27>(Ray::zero(), SRay::one()).is_zero())
+    // pow rounds down, so an exact result may land one ulp low.
+    let three = pow<18>(Wad::from_int(9), SWad::from_raw(500000000000000000)).raw()
+    assert!(three == 3000000000000000000 || three == 2999999999999999999)
+}
+
+#[test(should_revert)]
+fn pow_zero_to_negative_fails() {
+    let _ = pow<27>(Ray::zero(), -SRay::one())
+}
+
+#[test]
+fn cbrt_exact() {
+    assert!(cbrt<18>(Wad::zero()).is_zero())
+    assert!(cbrt<18>(Wad::from_int(27)) == Wad::from_int(3))
+    assert!(cbrt<18>(Wad::from_int(2)).raw() == 1259921049894873164)
+    assert!(cbrt<27>(Ray::from_int(8)) == Ray::from_int(2))
+    assert!(cbrt<18>(Wad::from_raw(1)).raw() == 1000000000000)
+    assert!(cbrt<18>(Wad::from_raw(MAX)).raw() == 48740834812604276470692694885616578541)
+    assert!(cbrt<0>(UFixed<0>::from_raw(MAX)).raw() == 48740834812604276470692694)
+}
+
+// SRay::from_ratio does not exist in core for signed types; tiny helper.
+trait SignedRatio {
+    fn from_ratio_signed(_ n: i256, _ d: i256) -> Self
+}
+impl<const D: u256> SignedRatio for Fixed<D> {
+    fn from_ratio_signed(_ n: i256, _ d: i256) -> Self {
+        Fixed<D>::from_raw(n * i256::from_word(Fixed<D>::SCALE) / d)
+    }
+}
