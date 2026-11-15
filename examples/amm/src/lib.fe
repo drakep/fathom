@@ -1,0 +1,164 @@
+// Pool: a minimal constant-product AMM ledger built on Fathom's amm module.
+//
+// Reserves are 18-decimal `Wad`s. Swaps pay out `get_amount_out` (rounded
+// down) and the tests check that `k = x * y` never decreases, which is the
+// property the rounding directions exist to protect. Accounting demo only:
+// no token transfers.
+use std::abi::sol
+use std::evm::{Ctx, Evm}
+use core::fixed::Wad
+use fathom::{Down, FixedOps, burn_liquidity, get_amount_in, get_amount_out, initial_liquidity, mint_liquidity}
+
+msg PoolMsg {
+    #[selector = sol("addLiquidity(uint256,uint256)")]
+    AddLiquidity { dx: u256, dy: u256 } -> u256,
+    #[selector = sol("removeLiquidity(uint256)")]
+    RemoveLiquidity { liquidity: u256 } -> (u256, u256),
+    #[selector = sol("swapXForY(uint256,uint256)")]
+    SwapXForY { dx: u256, min_dy: u256 } -> u256,
+    #[selector = sol("quoteXForY(uint256)")]
+    QuoteXForY { dx: u256 } -> u256,
+    #[selector = sol("quoteInForY(uint256)")]
+    QuoteInForY { dy: u256 } -> u256,
+    #[selector = sol("reserves()")]
+    Reserves -> (u256, u256),
+    #[selector = sol("supply()")]
+    Supply -> u256,
+}
+
+struct PoolStore {
+    x: u256,
+    y: u256,
+    supply: u256,
+}
+
+// 0.3%
+const FEE: Wad = Wad::from_ratio(3, 1000)
+
+pub contract Pool uses (ctx: Ctx) {
+    mut store: PoolStore
+
+    init() uses (mut store) {
+        store.x = 0
+        store.y = 0
+        store.supply = 0
+    }
+
+    recv PoolMsg {
+        AddLiquidity { dx, dy } -> u256 uses (mut store) {
+            let minted = if store.supply == 0 {
+                initial_liquidity<18>(Wad::from_raw(dx), Wad::from_raw(dy))
+            } else {
+                mint_liquidity<18>(Wad::from_raw(dx), Wad::from_raw(dy), Wad::from_raw(store.x), Wad::from_raw(store.y), Wad::from_raw(store.supply))
+            }
+            store.x = store.x + dx
+            store.y = store.y + dy
+            store.supply = store.supply + minted.raw()
+            minted.raw()
+        }
+
+        RemoveLiquidity { liquidity } -> (u256, u256) uses (mut store) {
+            let (ox, oy) = burn_liquidity<18>(Wad::from_raw(liquidity), Wad::from_raw(store.x), Wad::from_raw(store.y), Wad::from_raw(store.supply))
+            store.x = store.x - ox.raw()
+            store.y = store.y - oy.raw()
+            store.supply = store.supply - liquidity
+            (ox.raw(), oy.raw())
+        }
+
+        SwapXForY { dx, min_dy } -> u256 uses (mut store) {
+            let out = get_amount_out<18>(Wad::from_raw(dx), Wad::from_raw(store.x), Wad::from_raw(store.y), FEE).raw()
+            assert!(out >= min_dy)
+            store.x = store.x + dx
+            store.y = store.y - out
+            out
+        }
+
+        QuoteXForY { dx } -> u256 uses (store) {
+            get_amount_out<18>(Wad::from_raw(dx), Wad::from_raw(store.x), Wad::from_raw(store.y), FEE).raw()
+        }
+
+        QuoteInForY { dy } -> u256 uses (store) {
+            get_amount_in<18>(Wad::from_raw(dy), Wad::from_raw(store.x), Wad::from_raw(store.y), FEE).raw()
+        }
+
+        Reserves -> (u256, u256) uses (store) { (store.x, store.y) }
+        Supply -> u256 uses (store) { store.supply }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const WAD: u256 = 1000000000000000000
+
+fn deploy_seeded() -> Address uses (evm: mut Evm) {
+    let addr = evm.create2<Pool>(value: Wei::zero(), args: (), salt: 0)
+    let _: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: PoolMsg::AddLiquidity { dx: 1000 * WAD, dy: 2000 * WAD })
+    addr
+}
+
+fn k(_ x: u256, _ y: u256) -> Wad {
+    Wad::from_raw(x).mul_r<Down>(Wad::from_raw(y))
+}
+
+#[test]
+fn initial_liquidity_is_geometric_mean() uses (evm: mut Evm) {
+    let addr = deploy_seeded()
+    let s: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: PoolMsg::Supply {})
+    // sqrt(1000 * 2000) = 1414.213562373095048
+    assert!(s == 1414213562373095048801)
+}
+
+#[test]
+fn swap_matches_reference_and_keeps_k() uses (evm: mut Evm) {
+    let addr = deploy_seeded()
+    let (x0, y0): (u256, u256) = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: PoolMsg::Reserves {})
+    let out: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: PoolMsg::SwapXForY { dx: 10 * WAD, min_dy: 0 })
+    // Python exact: floor(floor(floor(10*0.997)*2000)/1009.97) = 19.743160687941225977
+    assert!(out == 19743160687941225977)
+    let (x1, y1): (u256, u256) = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: PoolMsg::Reserves {})
+    assert!(k(x1, y1) >= k(x0, y0))
+}
+
+#[test]
+fn many_small_swaps_never_decrease_k() uses (evm: mut Evm) {
+    let addr = deploy_seeded()
+    var i: u256 = 0
+    var dx: u256 = 1
+    while i < 25 {
+        let (x0, y0): (u256, u256) = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: PoolMsg::Reserves {})
+        let _: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: PoolMsg::SwapXForY { dx, min_dy: 0 })
+        let (x1, y1): (u256, u256) = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: PoolMsg::Reserves {})
+        assert!(k(x1, y1) >= k(x0, y0))
+        dx = dx * 7 + 3
+        i = i + 1
+    }
+}
+
+#[test]
+fn quote_in_covers_quote_out() uses (evm: mut Evm) {
+    let addr = deploy_seeded()
+    let want: u256 = 5 * WAD
+    let need: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: PoolMsg::QuoteInForY { dy: want })
+    let got: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: PoolMsg::QuoteXForY { dx: need })
+    // paying the rounded-up input always yields at least the requested output
+    assert!(got >= want)
+}
+
+#[test]
+fn remove_liquidity_returns_at_most_the_share() uses (evm: mut Evm) {
+    let addr = deploy_seeded()
+    let s: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: PoolMsg::Supply {})
+    let (ox, oy): (u256, u256) = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: PoolMsg::RemoveLiquidity { liquidity: s / 3 })
+    assert!(ox <= 1000 * WAD / 3 + 1)
+    assert!(oy <= 2000 * WAD / 3 + 1)
+    let added: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: PoolMsg::AddLiquidity { dx: ox, dy: oy })
+    assert!(added <= s / 3)
+}
+
+#[test(should_revert)]
+fn slippage_guard_reverts() uses (evm: mut Evm) {
+    let addr = deploy_seeded()
+    let _: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: PoolMsg::SwapXForY { dx: 10 * WAD, min_dy: 20 * WAD })
+}

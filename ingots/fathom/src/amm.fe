@@ -1,0 +1,63 @@
+//! Constant-product (x * y = k) pool math with explicit rounding.
+//!
+//! Every function rounds in the direction that keeps `k` from decreasing:
+//! outputs paid by the pool round down, inputs owed to the pool round up.
+//! Generic over the scale `D`, so the same code serves 18-decimal tokens and
+//! 6-decimal stablecoins (rescale between them with `checked_rescale`).
+use core::fixed::UFixed
+use super::ops::FixedOps
+use super::rounding::{Down, Up}
+
+/// Output for `amount_in` against reserves, after a fee (`fee` = 0.003 for
+/// 0.3%). Rounded down.
+pub fn get_amount_out<const D: u256>(
+    _ amount_in: UFixed<D>,
+    _ reserve_in: UFixed<D>,
+    _ reserve_out: UFixed<D>,
+    _ fee: UFixed<D>,
+) -> UFixed<D> {
+    let in_after_fee = amount_in.mul_r<Down>(UFixed<D>::one() - fee)
+    in_after_fee.mul_r<Down>(reserve_out).div_r<Down>(reserve_in + in_after_fee)
+}
+
+/// Input needed to receive `amount_out`, after a fee. Rounded up. Fails if
+/// `amount_out >= reserve_out`.
+pub fn get_amount_in<const D: u256>(
+    _ amount_out: UFixed<D>,
+    _ reserve_in: UFixed<D>,
+    _ reserve_out: UFixed<D>,
+    _ fee: UFixed<D>,
+) -> UFixed<D> {
+    assert!(amount_out < reserve_out)
+    let before_fee = reserve_in.mul_r<Up>(amount_out).div_r<Up>(reserve_out - amount_out)
+    before_fee.div_r<Up>(UFixed<D>::one() - fee)
+}
+
+/// Liquidity minted for the first deposit: `sqrt(x * y)`, rounded down.
+pub fn initial_liquidity<const D: u256>(_ x: UFixed<D>, _ y: UFixed<D>) -> UFixed<D> {
+    x.mul_r<Down>(y).sqrt()
+}
+
+/// Liquidity minted for a later deposit: `min(dx / x, dy / y) * supply`,
+/// rounded down.
+pub fn mint_liquidity<const D: u256>(
+    _ dx: UFixed<D>,
+    _ dy: UFixed<D>,
+    _ x: UFixed<D>,
+    _ y: UFixed<D>,
+    _ supply: UFixed<D>,
+) -> UFixed<D> {
+    let a = dx.mul_r<Down>(supply).div_r<Down>(x)
+    let b = dy.mul_r<Down>(supply).div_r<Down>(y)
+    a.min(b)
+}
+
+/// Reserves returned for burning `liquidity` of `supply`, rounded down.
+pub fn burn_liquidity<const D: u256>(
+    _ liquidity: UFixed<D>,
+    _ x: UFixed<D>,
+    _ y: UFixed<D>,
+    _ supply: UFixed<D>,
+) -> (UFixed<D>, UFixed<D>) {
+    (liquidity.mul_r<Down>(x).div_r<Down>(supply), liquidity.mul_r<Down>(y).div_r<Down>(supply))
+}

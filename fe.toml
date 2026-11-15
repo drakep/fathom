@@ -4,4 +4,6 @@ name = "fathom-workspace"
 version = "0.1.0"
 members = [
   { path = "ingots/fathom", name = "fathom" },
+  { path = "examples/savings", name = "savings" },
+  { path = "examples/amm", name = "amm" },
 ]

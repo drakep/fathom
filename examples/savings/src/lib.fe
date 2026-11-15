@@ -1,0 +1,158 @@
+// Savings: an interest-accruing deposit ledger built on Fathom.
+//
+// Depositors receive shares = amount / index (rounded DOWN); a share is worth
+// shares * index (rounded DOWN when paid out). Because both conversions
+// round against the depositor, a deposit/withdraw cycle can never extract
+// more than was put in, whatever the index. The index compounds a
+// per-second Ray rate derived from an APR with `apr_to_per_second`.
+//
+// This is an accounting demo: it tracks balances but does not move tokens.
+use std::abi::sol
+use std::evm::{Ctx, Evm, StorageMap}
+use core::fixed::{Ray, Wad}
+use fathom::{Accumulator, Down, apr_to_per_second, from_scaled, to_scaled}
+
+msg SavingsMsg {
+    #[selector = sol("deposit(uint256)")]
+    Deposit { amount: u256 } -> u256,
+    #[selector = sol("withdraw(uint256)")]
+    Withdraw { shares: u256 } -> u256,
+    #[selector = sol("balanceOf(address)")]
+    BalanceOf { account: Address } -> u256,
+    #[selector = sol("sharesOf(address)")]
+    SharesOf { account: Address } -> u256,
+    #[selector = sol("index()")]
+    Index -> u256,
+    #[selector = sol("ratePerSecond()")]
+    RatePerSecond -> u256,
+    #[selector = sol("totalShares()")]
+    TotalShares -> u256,
+}
+
+struct SavingsStore {
+    index: u256,
+    rate: u256,
+    last: u256,
+    total_shares: u256,
+    shares: StorageMap<Address, u256>,
+}
+
+fn load(_ index: u256, _ rate: u256, _ last: u256) -> Accumulator {
+    Accumulator { index: Ray::from_raw(index), rate: Ray::from_raw(rate), last }
+}
+
+pub contract Savings uses (ctx: Ctx) {
+    mut store: SavingsStore
+
+    // `apr` is a Ray, e.g. 5e25 for 5%.
+    init(apr: u256) uses (mut store, ctx) {
+        let acc = Accumulator::new(apr_to_per_second(Ray::from_raw(apr)), ctx.timestamp().as_seconds())
+        store.index = acc.index.raw()
+        store.rate = acc.rate.raw()
+        store.last = acc.last
+    }
+
+    recv SavingsMsg {
+        Deposit { amount } -> u256 uses (mut store, ctx) {
+            var acc = load(store.index, store.rate, store.last)
+            acc.accrue(ctx.timestamp().as_seconds())
+            store.index = acc.index.raw()
+            store.last = acc.last
+            let minted = to_scaled<Down>(Wad::from_raw(amount), acc.index).raw()
+            let who = ctx.caller()
+            store.shares.set(key: who, value: store.shares.get(key: who) + minted)
+            store.total_shares = store.total_shares + minted
+            minted
+        }
+
+        Withdraw { shares } -> u256 uses (mut store, ctx) {
+            var acc = load(store.index, store.rate, store.last)
+            acc.accrue(ctx.timestamp().as_seconds())
+            store.index = acc.index.raw()
+            store.last = acc.last
+            let who = ctx.caller()
+            let held = store.shares.get(key: who)
+            assert!(shares <= held)
+            store.shares.set(key: who, value: held - shares)
+            store.total_shares = store.total_shares - shares
+            from_scaled<Down>(Wad::from_raw(shares), acc.index).raw()
+        }
+
+        BalanceOf { account } -> u256 uses (store, ctx) {
+            let acc = load(store.index, store.rate, store.last)
+            let idx = acc.index_at(ctx.timestamp().as_seconds())
+            from_scaled<Down>(Wad::from_raw(store.shares.get(key: account)), idx).raw()
+        }
+
+        SharesOf { account } -> u256 uses (store) {
+            store.shares.get(key: account)
+        }
+
+        Index -> u256 uses (store) { store.index }
+        RatePerSecond -> u256 uses (store) { store.rate }
+        TotalShares -> u256 uses (store) { store.total_shares }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests. The test EVM has no time-warp cheat, so time-dependent accrual is
+// tested on `fathom::Accumulator` directly (ingots/fathom/src/test_rate.fe);
+// here we test the deployed contract's flows and rounding invariants.
+// ---------------------------------------------------------------------------
+
+const FIVE_PCT: u256 = 50000000000000000000000000
+
+fn deploy() -> Address uses (evm: mut Evm) {
+    evm.create2<Savings>(value: Wei::zero(), args: (FIVE_PCT,), salt: 0)
+}
+
+#[test]
+fn deploys_with_per_second_rate() uses (evm: mut Evm) {
+    let addr = deploy()
+    let idx: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: SavingsMsg::Index {})
+    assert!(idx == 1000000000000000000000000000)
+    let rate: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: SavingsMsg::RatePerSecond {})
+    assert!(rate == 1547125957863212449 || rate == 1547125957863212448)
+}
+
+#[test]
+fn deposit_and_withdraw_round_trip() uses (evm: mut Evm) {
+    let addr = deploy()
+    let amount: u256 = 1234567890123456789
+    let shares: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: SavingsMsg::Deposit { amount })
+    assert!(shares > 0)
+    let me = evm.address()
+    let bal: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: SavingsMsg::BalanceOf { account: me })
+    // same block: index unchanged, nothing gained
+    assert!(bal <= amount)
+    assert!(amount - bal <= 1)
+    let back: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: SavingsMsg::Withdraw { shares })
+    assert!(back <= amount)
+    let left: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: SavingsMsg::SharesOf { account: me })
+    assert!(left == 0)
+    let total: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: SavingsMsg::TotalShares {})
+    assert!(total == 0)
+}
+
+#[test]
+fn dust_deposits_cannot_extract_value() uses (evm: mut Evm) {
+    let addr = deploy()
+    var i: u256 = 0
+    var put: u256 = 0
+    var minted: u256 = 0
+    while i < 20 {
+        let s: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: SavingsMsg::Deposit { amount: 1 })
+        minted = minted + s
+        put = put + 1
+        i = i + 1
+    }
+    let back: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: SavingsMsg::Withdraw { shares: minted })
+    assert!(back <= put)
+}
+
+#[test(should_revert)]
+fn cannot_withdraw_more_shares_than_held() uses (evm: mut Evm) {
+    let addr = deploy()
+    let _: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: SavingsMsg::Deposit { amount: 1000 })
+    let _: u256 = evm.call(addr: addr, gas: 1000000, value: Wei::zero(), message: SavingsMsg::Withdraw { shares: 1001 })
+}

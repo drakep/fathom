@@ -1,0 +1,6 @@
+[ingot]
+name = "amm"
+version = "0.1.0"
+
+[dependencies]
+fathom = { path = "../../ingots/fathom" }

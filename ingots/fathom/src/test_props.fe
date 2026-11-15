@@ -1,0 +1,147 @@
+// Property-style tests run inside Fe: a deterministic pseudo-random generator
+// drives many inputs through algebraic invariants that must hold exactly.
+// (Fe has no built-in fuzzer; harness/run.py is the differential complement.)
+use core::fixed::{Fixed, Ray, SWad, UFixed, Wad}
+use ingot::{Down, FixedOps, Nearest, Up, Zero, cbrt, exp, get_amount_in, get_amount_out, ln, mul_div_r, signed_mul_div_r}
+
+struct Rng { s: u256 }
+
+impl Rng {
+    // 256-bit LCG (Knuth MMIX constants, wrapping) with xor-shift output.
+    #[arithmetic(unchecked)]
+    fn next(mut self) -> u256 {
+        self.s = self.s * 6364136223846793005 + 1442695040888963407
+        self.s ^ (self.s >> 128)
+    }
+    // value with a random bit-length in [1, max_bits]
+    fn sized(mut self, _ max_bits: u256) -> u256 {
+        let b = self.next() % max_bits + 1
+        let v = self.next()
+        if b >= 256 { v } else { v & ((1 << b) - 1) }
+    }
+}
+
+const N: u256 = 64
+
+#[test]
+fn rounding_modes_bracket_the_exact_value() {
+    var rng = Rng { s: 1 }
+    var i: u256 = 0
+    while i < N {
+        let a = rng.sized(160)
+        let b = rng.sized(160)
+        let d = rng.sized(128) + 1
+        let lo = mul_div_r<Down>(a, b, d)
+        if lo.is_some() {
+            let l = lo.unwrap()
+            let h = mul_div_r<Up>(a, b, d).unwrap()
+            let n = mul_div_r<Nearest>(a, b, d).unwrap()
+            assert!(l <= n && n <= h)
+            assert!(h - l <= 1)
+            assert!(mul_div_r<Zero>(a, b, d).unwrap() == l)
+        }
+        i = i + 1
+    }
+}
+
+#[test]
+fn signed_modes_are_mirror_images() {
+    var rng = Rng { s: 2 }
+    var i: u256 = 0
+    while i < N {
+        let a = i256::from_word(rng.sized(120))
+        let b = i256::from_word(rng.sized(120))
+        let d = i256::from_word(rng.sized(100) + 1)
+        // floor(-x) == -ceil(x), nearest is odd-symmetric, trunc is odd
+        assert!(signed_mul_div_r<Down>(-a, b, d).unwrap() == -signed_mul_div_r<Up>(a, b, d).unwrap())
+        assert!(signed_mul_div_r<Nearest>(-a, b, d).unwrap() == -signed_mul_div_r<Nearest>(a, b, d).unwrap())
+        assert!(signed_mul_div_r<Zero>(a, -b, d).unwrap() == -signed_mul_div_r<Zero>(a, b, d).unwrap())
+        // unsigned and signed agree on non-negative inputs
+        let u = mul_div_r<Down>(a.unsigned_abs(), b.unsigned_abs(), d.unsigned_abs()).unwrap()
+        assert!(signed_mul_div_r<Down>(a, b, d).unwrap() == i256::from_word(u))
+        i = i + 1
+    }
+}
+
+#[test]
+fn checked_add_sub_match_wide_arithmetic() {
+    var rng = Rng { s: 3 }
+    var i: u256 = 0
+    while i < N {
+        let a = Wad::from_raw(rng.next())
+        let b = Wad::from_raw(rng.next())
+        let sum = a.checked_add(b)
+        // overflow iff b > MAX - a
+        assert!(sum.is_none() == (b.raw() > 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff - a.raw()))
+        let diff = a.checked_sub(b)
+        assert!(diff.is_none() == (b > a))
+        if diff.is_some() {
+            assert!(diff.unwrap() + b == a)
+        }
+        i = i + 1
+    }
+}
+
+#[test]
+fn cbrt_is_exact_floor() {
+    var rng = Rng { s: 4 }
+    var i: u256 = 0
+    while i < N {
+        let x = Wad::from_raw(rng.sized(200))
+        let c = cbrt<18>(x).raw()
+        // c^3 <= x * 1e36 < (c + 1)^3, checked via c^3 / 1e36 in 512-bit
+        // terms: compare c^3 and (c+1)^3 against x * 1e36 using mul_div.
+        let c3 = mul_div_r<Down>(c * c, c, 1000000000000000000000000000000000000).unwrap()
+        assert!(c3 <= x.raw())
+        let d = c + 1
+        let d3 = mul_div_r<Up>(d * d, d, 1000000000000000000000000000000000000).unwrap()
+        assert!(d3 > x.raw() || (mul_div_r<Down>(d * d, d, 1000000000000000000000000000000000000).unwrap() > x.raw()))
+        i = i + 1
+    }
+}
+
+#[test]
+fn exp_ln_round_trip() {
+    var rng = Rng { s: 5 }
+    var i: u256 = 0
+    while i < 24 {
+        // x in [1e-9, ~1e20] Ray
+        let x = Ray::from_raw(rng.sized(160) + 1000000000000000000)
+        let back = exp<27>(ln<27>(x)).raw()
+        let diff = if back > x.raw() { back - x.raw() } else { x.raw() - back }
+        // |d exp(ln x)| <= x * (0.5 ulp of ln) + 1 ulp; allow x / 1e26 + 2
+        assert!(diff <= x.raw() / 100000000000000000000000000 + 2)
+        i = i + 1
+    }
+}
+
+#[test]
+fn monotonicity() {
+    var rng = Rng { s: 6 }
+    var i: u256 = 0
+    while i < 24 {
+        let a = rng.sized(90)
+        let b = a + rng.sized(60) + 1
+        assert!(ln<18>(Wad::from_raw(a + 1)) <= ln<18>(Wad::from_raw(b + 1)))
+        let sa = SWad::from_raw(i256::from_word(a % 100000000000000000000) - 50000000000000000000)
+        let sb = SWad::from_raw(i256::from_word(a % 100000000000000000000) - 50000000000000000000 + i256::from_word(b % 1000000000000000000))
+        assert!(exp<18>(sa) <= exp<18>(sb))
+        i = i + 1
+    }
+}
+
+#[test]
+fn amm_round_trip_never_profits_at_six_decimals() {
+    // USDC-style 6-decimal pool exercises the scale-generic code path.
+    var rng = Rng { s: 7 }
+    let x = UFixed<6>::from_int(1000000)
+    let y = UFixed<6>::from_int(500000)
+    let fee = UFixed<6>::from_ratio(3, 1000)
+    var i: u256 = 0
+    while i < 32 {
+        let want = UFixed<6>::from_raw(rng.sized(38) + 1)
+        let need = get_amount_in<6>(want, x, y, fee)
+        assert!(get_amount_out<6>(need, x, y, fee) >= want)
+        i = i + 1
+    }
+}
