@@ -2,3 +2,4 @@
 //! `core::fixed`. See README.md for what Fathom adds and what it reuses.
 pub use rounding::{Down, Nearest, Rounding, Up, Zero, apply_sign, mul_div_r, signed_mul_div_r}
 pub use ops::{FixedOps, checked_rescale, checked_rescale_signed}
+pub use math::{SRay, cbrt, exp, exp_from_e36, ln, ln_e36, log10, log2, pow}

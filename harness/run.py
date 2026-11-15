@@ -304,6 +304,35 @@ def r_ray_ln(x):
     return (D(x) / RAY).ln() * RAY
 
 
+def s_ray_pow(rng, n):
+    out = [(2 * RAY, RAY // 2), (RAY // 2, -2 * RAY), (10**30, 3 * RAY)]
+    while len(out) < n:
+        x = log_uniform(rng, 10**18, 10**36)
+        lnx = abs((D(x) / RAY).ln())
+        ymax = int(min(D(100), D(60) / lnx) * RAY) if lnx > 0 else 100 * RAY
+        out.append((x, uniform_signed(rng, -ymax, ymax)))
+    return out
+
+
+def r_ray_pow(x, y):
+    return ((D(x) / RAY).ln() * (D(y) / RAY)).exp() * RAY
+
+
+def r_ray_log10(x):
+    return (D(x) / RAY).ln() / D(10).ln() * RAY
+
+
+def s_ray_cbrt(rng, n):
+    out = [(0,), (1,), (RAY,), (8 * RAY,), (2**204 - 1,)]
+    while len(out) < n:
+        out.append((log_uniform(rng, 1, 2**204 - 1),))
+    return out
+
+
+def r_ray_cbrt(x):
+    return Fraction(icbrt(x * RAY * RAY))
+
+
 def r_log2(x):
     return (D(x) / WAD).ln() / LN2 * WAD
 
@@ -377,14 +406,28 @@ FATHOM_SPECS: list[Spec] = [
          "SWad::from_raw({a}).div_r<Nearest>(SWad::from_raw({b})).raw()", s_sdiv, r_sdiv,
          contract="nearest"),
     Spec("fathom.Wad.cbrt", "fathom", "cube root, rounded down", 1, False,
-         "cbrt(Wad::from_raw({a})).raw()", s_cbrt, r_cbrt, contract="floor"),
+         "cbrt<18>(Wad::from_raw({a})).raw()", s_cbrt, r_cbrt, contract="floor"),
     Spec("fathom.Wad.log2", "fathom", "log2(x)", 1, True,
-         "log2(Wad::from_raw({a})).raw()", s_log2, r_log2),
+         "log2<18>(Wad::from_raw({a})).raw()", s_log2, r_log2),
     Spec("fathom.Ray.exp", "fathom", "e^x at 27 decimals", 1, False,
-         "exp_ray(SRay::from_raw({a})).raw()", s_ray_exp, r_ray_exp, scale=RAY, ulp_unit="1e-27",
+         "exp<27>(SRay::from_raw({a})).raw()", s_ray_exp, r_ray_exp, scale=RAY, ulp_unit="1e-27",
          rel_floor=10**9),
     Spec("fathom.Ray.ln", "fathom", "ln(x) at 27 decimals", 1, True,
-         "ln_ray(Ray::from_raw({a})).raw()", s_ray_ln, r_ray_ln, scale=RAY, ulp_unit="1e-27"),
+         "ln<27>(Ray::from_raw({a})).raw()", s_ray_ln, r_ray_ln, scale=RAY, ulp_unit="1e-27"),
+    Spec("fathom.Wad.exp", "fathom", "e^x at 18 decimals (compare core.SWad.exp)", 1, False,
+         "exp<18>(SWad::from_raw({a})).raw()", s_exp, r_exp, contract="floor_approx"),
+    Spec("fathom.Wad.ln", "fathom", "ln(x) at 18 decimals (compare core.Wad.ln)", 1, True,
+         "ln<18>(Wad::from_raw({a})).raw()", s_ln, r_ln),
+    Spec("fathom.Wad.pow", "fathom", "x^y at 18 decimals (compare core.Wad.powf)", 2, False,
+         "pow<18>(Wad::from_raw({a}), SWad::from_raw({b})).raw()", s_powf, r_powf),
+    Spec("fathom.Ray.pow", "fathom", "x^y at 27 decimals", 2, False,
+         "pow<27>(Ray::from_raw({a}), SRay::from_raw({b})).raw()", s_ray_pow, r_ray_pow,
+         scale=RAY, ulp_unit="1e-27"),
+    Spec("fathom.Ray.log10", "fathom", "log10(x) at 27 decimals", 1, True,
+         "log10<27>(Ray::from_raw({a})).raw()", s_ray_ln, r_ray_log10, scale=RAY, ulp_unit="1e-27"),
+    Spec("fathom.Ray.cbrt", "fathom", "cube root at 27 decimals, rounded down", 1, False,
+         "cbrt<27>(Ray::from_raw({a})).raw()", s_ray_cbrt, r_ray_cbrt, contract="floor",
+         scale=RAY, ulp_unit="1e-27"),
     Spec("fathom.rate.compound", "fathom", "(1+r)^t, per-second Ray rate", 2, False,
          "compound(Ray::from_raw({a}), {b}).raw()", s_compound, r_compound, scale=RAY,
          ulp_unit="1e-27", rel_floor=10**9),
@@ -488,7 +531,7 @@ def analyse(spec: Spec, rows, values):
             got = to_signed(got)
         exact = spec.reference(*args)
         res["n"] += 1
-        if spec.contract != "approx":
+        if spec.contract not in ("approx", "floor_approx"):
             want = round_contract(exact if isinstance(exact, Fraction) else Fraction(exact), spec.contract)
             if got != want:
                 res["violations"].append({"args": [str(a) for a in args], "got": str(got), "want": str(want)})

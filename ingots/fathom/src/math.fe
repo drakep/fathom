@@ -1,0 +1,207 @@
+//! Scale-generic transcendental functions and cube root.
+//!
+//! `core::fixed` provides `exp`, `ln` and `powf` for 18 decimals only (bit
+//! exact ports of Solady). The functions here work for any scale
+//! `UFixed<D>` / `Fixed<D>` with `D <= 36` -- in particular `Ray` (27) -- by
+//! evaluating in a 36-decimal internal format and rounding once at the end.
+//!
+//! Method:
+//! * `exp`: reduce `x = k ln2 + r` with `|r| <= ln2 / 2`, sum the Taylor
+//!   series of `e^r` at 1e-36 until the terms vanish, scale by `2^k`, round
+//!   down.
+//! * `ln`: reduce `x = m 2^k` with `m` in `[1/sqrt2, sqrt2)`, use
+//!   `ln m = 2 atanh((m - 1) / (m + 1))` summed until the terms vanish, add
+//!   `k ln2`, round to nearest.
+//! * `log2`, `log10`: `ln` at 1e-36 divided by the 36-digit constant.
+//! * `pow(x, y) = exp(y ln x)` with the product kept at 1e-36.
+//! * `cbrt`: integer Newton iteration from above on `raw * 10^(2D)`, which
+//!   is exact (floor).
+//!
+//! Measured errors are in docs/ERROR_BOUNDS.md (harness/run.py).
+use core::fixed::{Fixed, UFixed}
+use core::num::{checked_mul_div, leading_zeros, mul_div}
+use core::panics::{PANIC_OVERFLOW}
+use super::rounding::{Nearest, Zero, signed_mul_div_r}
+
+/// 27-decimal signed fixed point (core has `Ray` but no signed alias).
+pub type SRay = Fixed<27>
+
+const E36: u256 = 1000000000000000000000000000000000000
+const E36I: i256 = 1000000000000000000000000000000000000
+const LN2_E36: i256 = 693147180559945309417232121458176568
+const LN10_E36: i256 = 2302585092994045684017991454684364208
+const SQRT2_E36: u256 = 1414213562373095048801688724209698078
+const HALF_SQRT2_E36: u256 = 707106781186547524400844362104849039
+
+fn bits(_ x: u256) -> u256 {
+    256 - leading_zeros(x)
+}
+
+/// `10^(36 - D)`; fails for `D > 36`.
+fn up_factor(_ d: u256) -> u256 {
+    assert!(d <= 36)
+    10 ** (36 - d)
+}
+
+// e^r * 1e36 for |r| <= ~0.35 (r at 1e36), Taylor series.
+fn exp_reduced(_ r: i256) -> u256 {
+    var sum: i256 = E36I
+    var term: i256 = E36I
+    var n: i256 = 1
+    while term != 0 {
+        term = term * r / (n * E36I)
+        sum = sum + term
+        n = n + 1
+    }
+    sum.unsigned_abs()
+}
+
+/// `e^x` at 1e-36 input precision, returned with `D` decimals, rounded down.
+/// Panics with `Panic(0x11)` if the result does not fit.
+pub fn exp_from_e36<const D: u256>(_ x: i256) -> UFixed<D> {
+    let p = up_factor(D)
+    // e^x < 10^-D / 2 for x < -(D ln10 + 1); also bounds k below.
+    let floor_x: i256 = -(i256::from_word(D) * LN10_E36 + E36I)
+    if x < floor_x {
+        return UFixed<D>::zero()
+    }
+    // e^180 > 2^256 * 10^36 / 10^0: nothing larger can fit.
+    if x > 180 * E36I {
+        core::panic_code(PANIC_OVERFLOW)
+    }
+    // k = round(x / ln2)
+    let half: i256 = LN2_E36 / 2
+    let k: i256 = if x >= 0 { (x + half) / LN2_E36 } else { (x - half) / LN2_E36 }
+    let r = x - k * LN2_E36
+    let er = exp_reduced(r)
+    if k >= 0 {
+        match checked_mul_div(er, 1 << k.unsigned_abs(), p) {
+            Some(v) => UFixed<D>::from_raw(v),
+            None => core::panic_code(PANIC_OVERFLOW),
+        }
+    } else {
+        UFixed<D>::from_raw((er / p) >> k.unsigned_abs())
+    }
+}
+
+/// `e^x` for any scale `D <= 36`, rounded down. Returns zero when the result
+/// is below one ulp; panics with `Panic(0x11)` when it exceeds `u256`.
+pub fn exp<const D: u256>(_ x: Fixed<D>) -> UFixed<D> {
+    let p = i256::from_word(up_factor(D))
+    // |x| <= 181 is all that matters; clamp before scaling so the product
+    // cannot overflow.
+    let lim: i256 = 181 * i256::from_word(Fixed<D>::SCALE)
+    if x.raw() < -lim {
+        return UFixed<D>::zero()
+    }
+    if x.raw() > lim {
+        core::panic_code(PANIC_OVERFLOW)
+    }
+    exp_from_e36<D>(x.raw() * p)
+}
+
+/// `ln(x) * 1e36` for `x` with `D` decimals. Fails for `x == 0`.
+pub fn ln_e36<const D: u256>(_ x: UFixed<D>) -> i256 {
+    let raw = x.raw()
+    assert!(raw != 0)
+    let p = up_factor(D)
+    // Find k with m = raw * p / 2^k in [E36 / sqrt2, E36 * sqrt2).
+    var k: i256 = i256::from_word(bits(raw) + bits(p)) - 120
+    var m = scaled_mantissa(raw, p, k)
+    while m >= SQRT2_E36 {
+        k = k + 1
+        m = scaled_mantissa(raw, p, k)
+    }
+    while m < HALF_SQRT2_E36 {
+        k = k - 1
+        m = scaled_mantissa(raw, p, k)
+    }
+    // ln m = 2 atanh(s), s = (m - 1) / (m + 1), |s| < 0.172
+    let mi = i256::from_word(m)
+    let s: i256 = (mi - E36I) * E36I / (mi + E36I)
+    let s2: i256 = s * s / E36I
+    var term: i256 = s
+    var sum: i256 = s
+    var n: i256 = 3
+    while term != 0 {
+        term = term * s2 / E36I
+        sum = sum + term / n
+        n = n + 2
+    }
+    k * LN2_E36 + 2 * sum
+}
+
+// raw * p / 2^k (k may be negative), rounded down.
+fn scaled_mantissa(_ raw: u256, _ p: u256, _ k: i256) -> u256 {
+    if k >= 0 {
+        mul_div(raw, p, 1 << k.unsigned_abs())
+    } else {
+        raw * p * (1 << k.unsigned_abs())
+    }
+}
+
+/// Converts a 1e-36 value to `D` decimals, rounded to nearest.
+fn from_e36<const D: u256>(_ v: i256) -> Fixed<D> {
+    let p = i256::from_word(up_factor(D))
+    Fixed<D>::from_raw(signed_mul_div_r<Nearest>(v, 1, p).unwrap())
+}
+
+/// Natural logarithm for any scale `D <= 36`, rounded to nearest. Fails for
+/// zero.
+pub fn ln<const D: u256>(_ x: UFixed<D>) -> Fixed<D> {
+    from_e36<D>(ln_e36<D>(x))
+}
+
+/// Base-2 logarithm, rounded to nearest. Fails for zero.
+pub fn log2<const D: u256>(_ x: UFixed<D>) -> Fixed<D> {
+    let l = signed_mul_div_r<Zero>(ln_e36<D>(x), E36I, LN2_E36).unwrap()
+    from_e36<D>(l)
+}
+
+/// Base-10 logarithm, rounded to nearest. Fails for zero.
+pub fn log10<const D: u256>(_ x: UFixed<D>) -> Fixed<D> {
+    let l = signed_mul_div_r<Zero>(ln_e36<D>(x), E36I, LN10_E36).unwrap()
+    from_e36<D>(l)
+}
+
+/// `x^y = e^(y ln x)` for any scale `D <= 36`, rounded down. `0^y` is 0 for
+/// `y > 0`, 1 for `y == 0`, and fails for `y < 0`.
+pub fn pow<const D: u256>(_ x: UFixed<D>, _ y: Fixed<D>) -> UFixed<D> {
+    if x.raw() == 0 {
+        assert!(y.raw() >= 0)
+        return if y.raw() == 0 { UFixed<D>::one() } else { UFixed<D>::zero() }
+    }
+    let e = match signed_mul_div_r<Zero>(ln_e36<D>(x), y.raw(), i256::from_word(Fixed<D>::SCALE)) {
+        Some(v) => v,
+        None => core::panic_code(PANIC_OVERFLOW),
+    }
+    exp_from_e36<D>(e)
+}
+
+/// Cube root, rounded down (exact). For `D <= 18` the whole `u256` range is
+/// supported; for larger `D` inputs above `2^(384 - 6.64 D)` raw panic with
+/// `Panic(0x11)`.
+pub fn cbrt<const D: u256>(_ x: UFixed<D>) -> UFixed<D> {
+    let raw = x.raw()
+    if raw == 0 {
+        return x
+    }
+    let s2 = UFixed<D>::SCALE * UFixed<D>::SCALE
+    // N = raw * s2 < 2^(bits(raw) + bits(s2)); start at 2^ceil(that / 3) >= cbrt(N).
+    var z: u256 = 1 << ((bits(raw) + bits(s2) + 2) / 3)
+    var next = cbrt_step(raw, s2, z)
+    while next < z {
+        z = next
+        next = cbrt_step(raw, s2, z)
+    }
+    UFixed<D>::from_raw(z)
+}
+
+// floor((2z + floor(N / z^2)) / 3) for N = raw * s2.
+fn cbrt_step(_ raw: u256, _ s2: u256, _ z: u256) -> u256 {
+    let q = match checked_mul_div(raw, s2, z) {
+        Some(v) => v / z,
+        None => core::panic_code(PANIC_OVERFLOW),
+    }
+    (2 * z + q) / 3
+}
