@@ -344,6 +344,17 @@ def r_ray_cbrt(x):
     return Fraction(icbrt(x * RAY * RAY))
 
 
+def s_exp36(rng, n):
+    out = [(0,), (10**36,), (-(10**36),)]
+    while len(out) < n:
+        out.append((uniform_signed(rng, -80 * 10**36, 40 * 10**36),))
+    return out
+
+
+def r_exp36(x):
+    return (D(x) / 10**36).exp() * 10**36
+
+
 def r_log2(x):
     return (D(x) / WAD).ln() / LN2 * WAD
 
@@ -439,6 +450,8 @@ FATHOM_SPECS: list[Spec] = [
     Spec("fathom.Ray.cbrt", "fathom", "cube root at 27 decimals, rounded down", 1, False,
          "cbrt<27>(Ray::from_raw({a})).raw()", s_ray_cbrt, r_ray_cbrt, contract="floor",
          scale=RAY, ulp_unit="1e-27"),
+    Spec("fathom.D36.exp", "fathom", "e^x at 36 decimals (outside the accuracy guarantee)", 1, False,
+         "exp<36>(Fixed<36>::from_raw({a})).raw()", s_exp36, r_exp36, scale=10**36, ulp_unit="1e-36"),
     Spec("fathom.rate.compound", "fathom", "(1+r)^t, per-second Ray rate", 2, False,
          "compound(Ray::from_raw({a}), {b}).raw()", s_compound, r_compound, scale=RAY,
          ulp_unit="1e-27", rel_floor=10**9),

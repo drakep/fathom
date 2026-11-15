@@ -110,3 +110,15 @@ impl<const D: u256> SignedRatio for Fixed<D> {
         Fixed<D>::from_raw(n * i256::from_word(Fixed<D>::SCALE) / d)
     }
 }
+
+// Documented in docs/FINDINGS.md: core's `**` rounds at every squaring step,
+// so for a fractional base and a large exponent the absolute error grows
+// (here 293 ulp). Fathom's pow, evaluated at 1e-36, stays within one ulp.
+#[test]
+fn integer_power_accuracy_vs_core() {
+    let x = Wad::from_raw(999671360967728412)
+    // exact: 0.599430601118269642734...
+    assert!((x ** 1557).raw() == 599430601118269349)
+    let ours = pow<18>(x, SWad::from_int(1557)).raw()
+    assert!(ours == 599430601118269642 || ours == 599430601118269641)
+}
