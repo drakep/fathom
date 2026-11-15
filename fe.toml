@@ -1,0 +1,7 @@
+# Fathom workspace. Requires Fe 26.6.0 exactly (see FE_VERSION, scripts/install-fe.sh).
+[workspace]
+name = "fathom-workspace"
+version = "0.1.0"
+members = [
+  { path = "ingots/fathom", name = "fathom" },
+]

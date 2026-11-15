@@ -1,0 +1,8 @@
+# Generated-probe ingot used by harness/run.py. Not a workspace member on purpose:
+# its tests emit thousands of sample events and are only meaningful to the harness.
+[ingot]
+name = "probe"
+version = "0.1.0"
+
+[dependencies]
+fathom = { path = "../../ingots/fathom" }
