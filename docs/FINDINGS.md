@@ -79,7 +79,7 @@ Drafts for the entrant to file at their discretion. Replace `https://github.com/
 >
 > Neither is a bug, since both match Solady, but the docs give no bound.
 > Suggest stating the bounds, or forming `ln(x) * y` with extra precision
-> inside `powf`. Reproduction: https://github.com/drakep/fathom/harness/run.py
+> inside `powf`. Reproduction: https://github.com/drakep/fathom/blob/master/harness/run.py
 
 ---
 
@@ -89,7 +89,7 @@ Drafts for the entrant to file at their discretion. Replace `https://github.com/
 > signed quantities (PnL, funding rates) need floor and ceiling to round
 > against the user consistently. A library implementation
 > (`signed_mul_div_r<R: Rounding>`) with exact-contract tests is in
-> https://github.com/drakep/fathom/ingots/fathom/src/rounding.fe.
+> https://github.com/drakep/fathom/blob/master/ingots/fathom/src/rounding.fe.
 
 ---
 
