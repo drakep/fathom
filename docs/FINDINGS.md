@@ -62,7 +62,7 @@ Maker-style rate math) must rescale to Wad and lose 9 digits.
 
 ## Draft upstream issues (NOT filed)
 
-Drafts for the entrant to file at their discretion. Replace `<repo URL>`.
+Drafts for the entrant to file at their discretion. Replace `https://github.com/drakep/fathom`.
 
 ---
 
@@ -79,7 +79,7 @@ Drafts for the entrant to file at their discretion. Replace `<repo URL>`.
 >
 > Neither is a bug, since both match Solady, but the docs give no bound.
 > Suggest stating the bounds, or forming `ln(x) * y` with extra precision
-> inside `powf`. Reproduction: <repo URL>/harness/run.py
+> inside `powf`. Reproduction: https://github.com/drakep/fathom/harness/run.py
 
 ---
 
@@ -89,7 +89,7 @@ Drafts for the entrant to file at their discretion. Replace `<repo URL>`.
 > signed quantities (PnL, funding rates) need floor and ceiling to round
 > against the user consistently. A library implementation
 > (`signed_mul_div_r<R: Rounding>`) with exact-contract tests is in
-> <repo URL>/ingots/fathom/src/rounding.fe.
+> https://github.com/drakep/fathom/ingots/fathom/src/rounding.fe.
 
 ---
 

@@ -51,7 +51,7 @@ it without wrapping or conversion.
 
 ## Private submission form checklist (fill in yourself)
 
-- [ ] **Repository URL:** publish this repo (e.g. GitHub, public) and paste the URL. Replace `<repo URL>` in `docs/FINDINGS.md`.
+- [ ] **Repository URL:** publish this repo (e.g. GitHub, public) and paste the URL. Replace `https://github.com/drakep/fathom` in `docs/FINDINGS.md`.
 - [ ] **Commit SHA:** after your final commit, `git rev-parse HEAD`.
 - [ ] **Fe version:** `26.6.0` (`fe --version` prints `fe 26.6.0 (5b3f96a)`). It is pinned in `FE_VERSION` and installed by `scripts/install-fe.sh` with sha256 verification.
 - [ ] **License:** MIT (`LICENSE`). Optionally replace "The Fathom authors" with your name.
