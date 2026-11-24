@@ -25,7 +25,7 @@ which core provides only at 18 decimals. Fathom attaches these methods to
 core's own types through an extension trait, so existing `Wad` code adopts
 it without wrapping or conversion.
 
-## Declaration of pre-existing work, reused code and AI assistance (draft)
+## Declaration of pre-existing work, reused code and AI assistance
 
 * **Pre-existing work:** none. The repository was created during the contest
   period (first commit 2026-11-15).
@@ -38,16 +38,17 @@ it without wrapping or conversion.
   code is new. The mathematical methods (Taylor and atanh series, Newton's
   method, scaled-balance accounting, constant-product formulas) are standard
   techniques.
-* **AI assistance:** This project was built with substantial AI assistance
-  (Anthropic's Claude, working as a coding agent in Claude Code) under the
-  entrant's direction. The entrant chose the project and its scope, and
-  redirected it after the agent found that `core::fixed` already covered the
-  original plan. The AI wrote most of the code, tests, harness and
-  documentation, and the entrant reviewed them. Every accuracy figure was
-  produced by running the code (see `harness/run.py`), not estimated.
+* **AI assistance:** Fathom was developed using Anthropic's Claude Code as
+  an AI-assisted development tool. I directed the project scope, technical
+  architecture, and development priorities, including adapting the design to
+  complement Fe's existing fixed-point capabilities.
 
-  > Entrant: edit this paragraph so it accurately states how much you
-  > reviewed or changed yourself before you submit.
+  Claude assisted extensively with implementation, automated testing,
+  differential benchmarking, and documentation.
+
+  All reported accuracy and rounding results are backed by executable tests
+  and reproducible benchmarks available in the repository, including the
+  differential testing harness at `harness/run.py`.
 
 ## Private submission form checklist (fill in yourself)
 
@@ -57,6 +58,6 @@ it without wrapping or conversion.
 - [ ] **License:** MIT (`LICENSE`). Optionally replace "The Fathom authors" with your name.
 - [ ] **Build/test instructions:** README, section "Build and test". Command: `scripts/test.sh` (expect `test result: ok. 42 passed; 0 failed`).
 - [ ] **Demo:** `examples/savings` and `examples/amm`, run by `fe test .`.
-- [ ] **Pitch, Fe-specific highlight, declaration:** copy from above. Review the AI paragraph.
+- [ ] **Pitch, Fe-specific highlight, declaration:** copy from above. 
 - [ ] **Optional:** file the draft upstream issues in `docs/FINDINGS.md` (not filed).
 - [ ] Re-run `scripts/test.sh --harness` if you change any math, and commit the regenerated `docs/ERROR_BOUNDS.md`.
